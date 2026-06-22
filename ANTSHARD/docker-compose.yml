@@ -1,0 +1,90 @@
+version: "3.9"
+
+# ANT-SHARD demo: node_a owns layers 0-15, node_b owns 16-31
+# CPU-only. No GPU required.
+# Usage:
+#   1. Place your model shards at ./shards/shard_0.gguf and ./shards/shard_1.gguf
+#      (run: python src/splitter.py path/to/model.gguf --shards 2 --output-dir ./shards)
+#   2. docker compose up
+#   3. curl -X POST http://localhost:8080/infer -d '{"prompt":"Hello","max_tokens":32}'
+
+services:
+
+  registry:
+    build:
+      context: .
+      dockerfile: Dockerfile.registry
+    container_name: ant-registry
+    ports:
+      - "9000:9000"
+    volumes:
+      - registry_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/shard/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  node_a:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: ant-shard-node-a
+    depends_on:
+      registry:
+        condition: service_healthy
+    volumes:
+      - ./shards:/shards:ro
+    command:
+      - "--shard=/shards/shard_0.gguf"
+      - "--layers=0-15"
+      - "--registry=http://registry:9000"
+      - "--next=http://node_b:8081"
+      - "--host=0.0.0.0"
+      - "--port=8081"
+    environment:
+      - LLAMA_NO_METAL=1
+    restart: unless-stopped
+
+  node_b:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: ant-shard-node-b
+    depends_on:
+      registry:
+        condition: service_healthy
+    volumes:
+      - ./shards:/shards:ro
+    command:
+      - "--shard=/shards/shard_1.gguf"
+      - "--layers=16-31"
+      - "--registry=http://registry:9000"
+      - "--host=0.0.0.0"
+      - "--port=8081"
+    environment:
+      - LLAMA_NO_METAL=1
+    restart: unless-stopped
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile.shard
+    container_name: ant-pipeline
+    depends_on:
+      - node_a
+      - node_b
+    ports:
+      - "8080:8080"
+    command:
+      - "python"
+      - "/app/src/pipeline.py"
+      - "--registry=http://registry:9000"
+      - "--model=shard_0.gguf"
+      - "--host=0.0.0.0"
+      - "--port=8080"
+    restart: unless-stopped
+
+volumes:
+  registry_data:
